@@ -27,11 +27,25 @@ def get_db_connection():
             port=3306
         )
         cursor = connection.cursor()
-        cursor.execute("SELECT 1")
+
+        # Проверяем, существует ли колонка logs
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_NAME = 'lr1db' AND COLUMN_NAME = 'logs'
+        """)
+        column_exists = cursor.fetchone()[0]
+
+        # Добавляем колонку, если её нет
+        if column_exists == 0:
+            cursor.execute("ALTER TABLE lr1db ADD COLUMN logs TEXT")
+            connection.commit()
+
         return connection
     except Error as e:
         print(f"Ошибка подключения: {e}")
         return None
+
 
 # Глобальная переменная для хранения состояния команд
 command_states = {
@@ -68,8 +82,12 @@ def toggle_command():
 
     return redirect(url_for('home'))
 
-# Регистрация пользователя через Telegram
+# Обработчик команды регистрации пользователя
 async def handle_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not command_states["register"]:
+        await notify_command_disabled(update, "/register")
+        return
+
     user = update.effective_user
     telegram_id = user.id
     username = user.username
@@ -89,13 +107,19 @@ async def handle_registration(update: Update, context: ContextTypes.DEFAULT_TYPE
             (telegram_id, username)
         )
         conn.commit()
-        bot_reply = "Вы успешно зарегистрированы!" if cursor.rowcount > 0 else "Вы уже зарегистрированы!"
+
+        # Проверяем, была ли вставка в таблицу
+        if cursor.rowcount > 0:
+            bot_reply = "Вы успешно зарегистрированы!"
+        else:
+            bot_reply = "Вы уже зарегистрированы!"
     except Error as e:
         bot_reply = f"Ошибка регистрации: {e}"
     finally:
         conn.close()
 
     await update.message.reply_text(bot_reply)
+    log_conversation_to_db(user.id, user.username, "/register", random_message)
 
 
 
@@ -141,6 +165,7 @@ async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game_active = True
     secret_word = random.choice(game_words)
     await update.message.reply_text("Игра началась! Угадайте слово из списка: яблоко, груша, банан, апельсин, ананас, виноград, фейхоа. Напишите слово в чат! Чтобы закончить игру напишите слово стоп или используйте команду /stop_game ")
+    log_conversation_to_db(user.id, user.username, "/start_game", random_message)
 
 # Обработка команды /stop_game
 async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -156,6 +181,7 @@ async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     game_active = False
     await update.message.reply_text("Игра остановлена.")
+    log_conversation_to_db(user.id, user.username, "/stop_game", random_message)
 
 # Обработка сообщений во время игры
 async def game_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -175,12 +201,36 @@ async def game_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Неправильно! Попробуйте еще раз.")
 
-# Функция для записи сообщений в файл
-def log_conversation(user_id, username, message, bot_reply):
+# Функция для записи сообщений в БД
+def log_conversation_to_db(user_id, username, message, bot_reply):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with open(conversation_log_file, "a", encoding="utf-8") as log_file:
-        log_file.write(f"[{timestamp}] {username} (ID: {user_id}): {message}\n")
-        log_file.write(f"[{timestamp}] Бот: {bot_reply}\n\n")
+
+    conn = get_db_connection()
+    if conn is None:
+        print("Ошибка подключения к базе данных для записи логов.")
+        return
+
+    try:
+        cursor = conn.cursor()
+
+        # Добавляем сообщение пользователя
+        cursor.execute(
+            "INSERT INTO messages (userid, telegram_id, username, message, timestamp) VALUES (%s, %s, %s, %s, %s)",
+            (user_id, user_id, username, message, timestamp)
+        )
+
+        # Добавляем ответ бота
+        cursor.execute(
+            "INSERT INTO messages (userid, telegram_id, username, message, timestamp) VALUES (%s, %s, %s, %s, %s)",
+            (user_id, user_id, "bot", bot_reply, timestamp)
+        )
+
+        conn.commit()
+    except Error as e:
+        print(f"Ошибка записи лога: {e}")
+    finally:
+        conn.close()
+
 
 # Обработчик команды /start
 async def send_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -191,7 +241,7 @@ async def send_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     random_message = random.choice(random_messages_dict)
     user = update.effective_user
     await update.message.reply_text(random_message)
-    log_conversation(user.id, user.username, "/start", random_message)
+    log_conversation_to_db(user.id, user.username, "/start", random_message)
 
 # Таймер для отправки случайных фраз из файла
 async def send_random_phrase_from_file(chat_id, bot: Bot):
@@ -202,7 +252,7 @@ async def send_random_phrase_from_file(chat_id, bot: Bot):
                 if lines:
                     random_line = random.choice(lines).strip()
                     await bot.send_message(chat_id=chat_id, text=random_line)
-                    log_conversation(chat_id, chat_id, "Таймер: фраза", random_line)
+                    log_conversation_to_db(chat_id, chat_id, "Таймер: фраза", random_line)
             await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"Ошибка при чтении файла: {e}")
@@ -220,12 +270,12 @@ async def start_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if timer_task:
         bot_reply = "Таймер уже запущен."
         await update.message.reply_text(bot_reply)
-        log_conversation(update.effective_user.id, update.effective_user.username, "/start_timer", bot_reply)
+        log_conversation_to_db(update.effective_user.id, update.effective_user.username, "/start_timer", bot_reply)
         return
 
     bot_reply = "Таймер запущен. Буду отправлять случайные фразы каждые 5 секунд!"
     await update.message.reply_text(bot_reply)
-    log_conversation(update.effective_user.id, update.effective_user.username, "/start_timer", bot_reply)
+    log_conversation_to_db(update.effective_user.id, update.effective_user.username, "/start_timer", bot_reply)
 
     async def timer_wrapper():
         await send_random_phrase_from_file(chat_id, context.bot)
@@ -247,38 +297,7 @@ async def stop_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_reply = "Таймер не был запущен."
 
     await update.message.reply_text(bot_reply)
-    log_conversation(update.effective_user.id, update.effective_user.username, "/stop_timer", bot_reply)
-
-# Обработчик команды регистрации пользователя
-async def handle_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not command_states["register"]:
-        await notify_command_disabled(update, "/register")
-        return
-
-    user = update.effective_user
-    telegram_id = user.id
-    username = user.username
-
-    conn = get_db_connection()
-    if conn is None:
-        bot_reply = "Ошибка подключения к базе данных."
-        await update.message.reply_text(bot_reply)
-        return
-
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO lr1db (telegram_id, username) VALUES (%s, %s)",
-            (telegram_id, username)
-        )
-        conn.commit()
-        bot_reply = "Вы успешно зарегистрированы!"
-    except Error as e:
-        bot_reply = f"Ошибка регистрации: {e}"
-    finally:
-        conn.close()
-
-    await update.message.reply_text(bot_reply)
+    log_conversation_to_db(update.effective_user.id, update.effective_user.username, "/stop_timer", bot_reply)
 
 # Обработка текстовых файлов
 async def handle_text_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -300,6 +319,76 @@ async def handle_text_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Файл не является текстовым. Пожалуйста, отправьте текстовый файл (.txt).")
 
+# Обработчик команды /statistics
+async def send_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = get_db_connection()
+    if conn is None:
+        await update.message.reply_text("Ошибка подключения к базе данных для получения статистики.")
+        return
+
+    try:
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+
+        # Получаем статистику по дням
+        cursor.execute("""
+            SELECT DATE(timestamp) AS date, COUNT(*) AS total_messages 
+            FROM messages 
+            GROUP BY DATE(timestamp)
+        """)
+        daily_stats = cursor.fetchall()
+
+        # Получаем статистику по пользователям
+        cursor.execute("""
+            SELECT username, COUNT(*) AS messages 
+            FROM messages 
+            WHERE username != 'bot'
+            GROUP BY username
+        """)
+        user_stats = cursor.fetchall()
+
+        # Получаем статистику по командам
+        cursor.execute("""
+            SELECT message AS command, COUNT(*) AS count
+            FROM messages
+            WHERE message LIKE '/%'
+            GROUP BY command
+        """)
+        command_stats = cursor.fetchall()
+
+        # Форматируем статистику
+        stats_message = "📊 *Статистика* 📊\n\n"
+
+        # Добавляем статистику по дням
+        stats_message += "*Сообщения по дням:*\n"
+        for stat in daily_stats:
+            stats_message += f"  - {stat['date']}: {stat['total_messages']} сообщений\n"
+
+        # Добавляем статистику по пользователям
+        stats_message += "\n*Сообщения по пользователям:*\n"
+        for stat in user_stats:
+            stats_message += f"  - {stat['username']}: {stat['messages']} сообщений\n"
+
+        # Добавляем статистику по командам
+        stats_message += "\n*Использование команд:*\n"
+        for stat in command_stats:
+            stats_message += f"  - {stat['command']}: {stat['count']} раз\n"
+
+        await update.message.reply_text(stats_message)
+    finally:
+        conn.close()
+
+# Вызываем обновление статистики после получения статистики
+@app.route('/statistics')
+def statistics():
+    stats = get_statistics()
+    if isinstance(stats, str):  # Если ошибка подключения
+        return stats
+
+    # Обновляем статистику в базе данных
+    update_statistics_in_db()
+
+    return render_template('statistics.html', stats=stats)
+
 # Основная функция для запуска бота
 async def main():
     application = Application.builder().token(TOKEN).build()
@@ -311,6 +400,7 @@ async def main():
     application.add_handler(CommandHandler("register", handle_registration))
     application.add_handler(CommandHandler("start_game", start_game))
     application.add_handler(CommandHandler("stop_game", stop_game))
+    application.add_handler(CommandHandler("statistics", send_statistics))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_guess))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_text_file))
 
@@ -322,7 +412,7 @@ async def main():
 async def notify_command_disabled(update: Update, command_name: str):
     message = f"Команда {command_name} отключена администратором."
     await update.message.reply_text(message)
-    log_conversation(update.effective_user.id, update.effective_user.username, command_name, message)
+    log_conversation_to_db(update.effective_user.id, update.effective_user.username, command_name, message)
 
 
 def run_flask():

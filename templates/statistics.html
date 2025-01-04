@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Статистика</title>
+</head>
+<body>
+    <h1>Статистика</h1>
+
+    <h2>Сообщения по дням</h2>
+    <table border="1">
+        <tr>
+            <th>Дата</th>
+            <th>Сообщений</th>
+        </tr>
+        {% for stat in stats['daily_stats'] %}
+        <tr>
+            <td>{{ stat['date'] }}</td>
+            <td>{{ stat['total_messages'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    <h2>Сообщения по пользователям</h2>
+    <table border="1">
+        <tr>
+            <th>Пользователь</th>
+            <th>Сообщений</th>
+        </tr>
+        {% for user in stats['user_stats'] %}
+        <tr>
+            <td>{{ user['username'] }}</td>
+            <td>{{ user['messages'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    <h2>Статистика команд</h2>
+    <table border="1">
+        <tr>
+            <th>Команда</th>
+            <th>Использований</th>
+        </tr>
+        {% for cmd in stats['command_stats'] %}
+        <tr>
+            <td>{{ cmd['command'] }}</td>
+            <td>{{ cmd['count'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</body>
+</html>
